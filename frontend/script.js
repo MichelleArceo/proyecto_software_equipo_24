@@ -25,7 +25,7 @@ function appendMessage(text, sender) {
     const chatHistory = document.getElementById('chat-history');
     const messageDiv = document.createElement('div');
     messageDiv.classList.add('message', sender);
-    messageDiv.textContent = text;
+    messageDiv.innerHTML = text;
     chatHistory.appendChild(messageDiv);
     
     // Desplazar hacia abajo automáticamente
@@ -55,7 +55,12 @@ async function getBotResponseFromBackend(message) {
 
     if (!res.ok) {
       const errText = await res.text();
-      appendMessage(`❌ Error: ${res.status} ${errText}`, 'bot');
+      const httpCode = res.status;
+      if (httpCode != 422) {
+        appendMessage(`❌ Error: ${res.status} ${errText}`, 'bot');
+      } else {
+        appendMessage("❌ Esta operación no está implementada, por favor intenta de nuevo.");
+      }
       return;
     }
 
@@ -63,12 +68,35 @@ async function getBotResponseFromBackend(message) {
 
     // 2) Render: lista de recomendaciones si viene "detalles"
     if (Array.isArray(data.detalles) && data.detalles.length) {
-      const lines = data.detalles.map((d, i) => {
-        const t = d.pelicula?.titulo ?? '(sin título)';
-        const r = d.razon_recomendacion ? ` — ${d.razon_recomendacion}` : '';
-        return `${i + 1}. ${t}${r}`;
-      });
-      appendMessage(`🎬 Recomendaciones:\n${lines.join('\n')}`, 'bot');
+      const rows = data.detalles.map((d, i) => {
+        const titulo = d.pelicula?.titulo ?? '(sin título)';
+        const razon = d.razon_recomendacion ?? '';
+        return `
+          <tr>
+            <td style="padding: 4px 8px; vertical-align: top;"><strong>${i + 1}. ${titulo}</strong></td>
+            <td style="padding: 4px 8px; vertical-align: top;">${razon}</td>
+          </tr>
+        `;
+      }).join('');
+
+      const tableHTML = `
+        <div>
+          <p>🎬 <strong>Recomendaciones:</strong></p>
+          <table style="border-collapse: collapse; width: 100%; margin-top: 6px;">
+            <thead>
+              <tr>
+                <th style="text-align: left; padding: 4px 8px;">Película</th>
+                <th style="text-align: left; padding: 4px 8px;">Motivo</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rows}
+            </tbody>
+          </table>
+        </div>
+      `;
+
+      appendMessage(tableHTML, 'bot', true); // <- tercer parámetro si tu función admite HTML
       return;
     }
 
