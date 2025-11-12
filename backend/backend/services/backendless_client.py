@@ -21,8 +21,40 @@ def backendless_post(table: str, payload: dict):
     return r.json()
 
 
-def backendless_get(table: str, where: str = None):
-    params = {"where": where} if where else {}
-    r = requests.get(get_full_url(f"data/{table}"), params=params, headers=HEADERS)
+def backendless_get(table: str, where: str | dict | None = None):
+    """
+    Realiza una consulta GET a Backendless.
+    Puede recibir:
+      - una cadena 'where' (por ejemplo: "campo='valor'")
+      - un diccionario con parámetros (por ejemplo: {"where": "campo='valor'", "sortBy": "fecha desc"})
+      - una ruta directa (por ejemplo: "peliculas/1234-5678")
+    """
+    # Si el nombre contiene '/', asumimos que es una ruta directa (GET /data/{tabla}/{id})
+    if "/" in table:
+        url = get_full_url(f"data/{table}")
+        r = requests.get(url, headers=HEADERS)
+        r.raise_for_status()
+        return r.json()
+
+    # Si 'where' es cadena -> la convertimos en params dict
+    if isinstance(where, str):
+        params = {"where": where}
+    # Si 'where' ya es un dict (puede incluir sortBy, pageSize, etc.)
+    elif isinstance(where, dict):
+        params = where
+    else:
+        params = {}
+
+    # Hacer la llamada con query params
+    url = get_full_url(f"data/{table}")
+    r = requests.get(url, params=params, headers=HEADERS)
     r.raise_for_status()
     return r.json()
+
+
+def backendless_patch(table: str, object_id: str, payload: dict):
+    url = get_full_url(f"data/{table}/{object_id}")
+    r = requests.put(url, json=payload, headers=HEADERS)
+    r.raise_for_status()
+    return r.json()
+

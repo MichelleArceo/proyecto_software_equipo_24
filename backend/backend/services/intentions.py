@@ -2,6 +2,7 @@ from typing import Optional
 
 import re
 import spacy
+import statistics
 import unicodedata
 
 # Cargar modelo pequeño de español
@@ -14,13 +15,53 @@ INTENT_EXAMPLES = {
         "recomiéndame una película",
         "quiero ver algo nuevo",
         "sugiéreme una película",
-        "busca películas de terror"
+        "busca películas de terror",
+        "busca películas de acción",
+        "busca películas de amor",
+        "busca películas de Pixar",
+        "busca películas de Disney",
+        "busca películas de comedia",
+        "busca películas de ciencia ficción",
+        "busca películas de drama",
+        "dame una recomendación",
+        "quiero descubrir una película diferente",
+        "qué película me recomiendas hoy"
     ],
     "ver_recomendaciones": [
         "muéstrame las recomendaciones",
         "quiero ver las sugerencias",
         "enséñame mis recomendaciones anteriores",
-        "lista de recomendaciones"
+        "lista de recomendaciones",
+        "quiero revisar mis recomendaciones",
+        "muestra las películas sugeridas",
+        "ver recomendaciones guardadas"
+    ],
+    "calificar_recomendaciones": [
+        "quiero calificar las recomendaciones",
+        "quiero evaluar las sugerencias",
+        "quiero poner calificación a las películas recomendadas",
+        "quiero revisar y calificar las películas",
+        "deseo evaluar las recomendaciones del sistema",
+        "quiero asignar estrellas a las recomendaciones",
+        "quiero dar mi opinión sobre las recomendaciones"
+    ],
+    "buscar_similares": [
+        "muéstrame películas parecidas a Inception",
+        "quiero algo similar a Titanic",
+        "películas como Matrix",
+        "quiero ver algo parecido a Avatar",
+        "recomiéndame algo del estilo de Shrek",
+        "busca películas parecidas a Harry Potter",
+        "dame opciones similares a El Señor de los Anillos"
+    ],
+    "ver_tendencias": [
+        "qué películas están de moda",
+        "muéstrame los estrenos de esta semana",
+        "quiero ver las más populares",
+        "dime las películas del momento",
+        "enséñame las películas más vistas",
+        "cuáles son los estrenos recientes",
+        "muestra lo que está en tendencia"
     ],
 }
 
@@ -49,7 +90,8 @@ def detect_intention(mensaje: str) -> dict:
         elif "sobre" in palabras:
             idx = palabras.index("sobre")
             consulta = " ".join(palabras[idx + 1 :])
-        return {"intencion": "nueva_recomendacion", "consulta": consulta or "popular"}
+        print(f"\nConsulta: {consulta}\n")
+        return {"intencion": "nueva_recomendacion", "consulta": consulta}
 
     # --- Intención 2: ver recomendaciones previas ---
     patrones_consulta = [
@@ -89,7 +131,8 @@ def detect_intention_spacy_sm(texto: str):
         for token in doc:
             if token.text in ["de", "sobre"]:
                 consulta = " ".join([t.text for t in token.subtree if t != token])
-        return {"intencion": "nueva_recomendacion", "consulta": consulta or "popular"}
+        print(f"\nConsulta: {consulta}\n")
+        return {"intencion": "nueva_recomendacion", "consulta": consulta}
 
     # --- Intención: ver recomendaciones ---
     if any(v in ["ver", "mostrar", "consultar", "enseñar", "listar"] for v in verbos):
@@ -103,44 +146,45 @@ def detect_intention_spacy_sm(texto: str):
     return {"intencion": "no_implementada", "consulta": None}
 
 
-# util: extraer texto de la subtree tras una preposición (de, sobre, acerca de...)
+
+    if not t: return None
+    t = re.sub(r"\s+", " ", t).strip()
+    return t if t else None
+
+
+# ───────────────────────────────
+# Utilidades lingüísticas
+# ───────────────────────────────
 def _extract_after_prep(doc):
     """
-    Devuelve el texto que aparece después de la última preposición relevante
-    ('de', 'sobre', 'acerca', 'por', etc.). Si no encuentra nada, retorna None.
+    Devuelve el texto después de la última preposición relevante
+    ('de', 'sobre', 'acerca', 'por', etc.)
     """
-    preps = {"de", "sobre", "acerca", "por"}
+    preps = {"a", "de", "sobre", "acerca", "por"}
     last_prep_idx = -1
 
-    # Buscar la última ocurrencia de una preposición relevante
     for i, token in enumerate(doc):
         if token.text.lower() in preps or token.dep_ == "prep":
             last_prep_idx = i
 
-    # Si no se encontró ninguna preposición, salir
     if last_prep_idx == -1 or last_prep_idx == len(doc) - 1:
         return None
 
-    # Tomar todos los tokens después de la última preposición
     after_tokens = [t.text for t in doc[last_prep_idx + 1:] if not t.is_punct]
     phrase = " ".join(after_tokens).strip()
 
-    # Evitar resultados triviales o vacíos
     if not phrase or len(phrase.split()) == 0:
         return None
-
     return phrase
 
 
-# util: elegir mejor noun_chunk por heurística y similitud
 def _choose_nounchunk_by_similarity(doc, kandid):
-    # kandid: lista de noun_chunks (spans)
+    """Elige el noun_chunk más representativo por similitud semántica."""
     if not kandid:
         return None
     best = None
     best_sim = -1.0
     for chunk in kandid:
-        # omitimos chunks muy cortos o de stopwords
         txt = chunk.text.strip()
         if len(txt) < 2:
             continue
@@ -151,53 +195,125 @@ def _choose_nounchunk_by_similarity(doc, kandid):
     return best
 
 
-# util: limpiar resultado (quitar espacios sobrantes)
 def _clean_topic(t: Optional[str]) -> Optional[str]:
-    if not t: return None
+    """Limpia espacios o caracteres redundantes."""
+    if not t:
+        return None
     t = re.sub(r"\s+", " ", t).strip()
     return t if t else None
 
 
-def detect_intention_spacy(texto: str, umbral: float = 0.72):
+def merge_named_entities(doc):
+    """Combina entidades compuestas (ej. 'Toy Story') en un solo token virtual."""
+    spans = list(doc.ents)
+    with doc.retokenize() as retokenizer:
+        for span in spans:
+            if span.label_ in {"WORK_OF_ART", "ORG", "PERSON", "MISC"}:
+                retokenizer.merge(span)
+    return doc
+
+
+def detect_intention_spacy_old(texto: str, umbral: float = 0.55):
     """
-    Retorna dict: { 'intencion': <str>, 'similitud': <float>, 'tema': <str|None'> }
-    Usa comparacion semántica para intención y varias heurísticas para extraer tema.
+    Retorna dict:
+      {
+        'intencion': <str>,
+        'similitud': <float>,
+        'consulta': <str | None>
+      }
+
+    Usa comparación semántica promedio para intención,
+    y heurísticas lingüísticas para extraer tema (consulta).
     """
     doc = nlp(texto)
-    # 1) detectar intención por similitud con ejemplos
+    doc = merge_named_entities(doc)
     mejor_intencion = "no_implementada"
     mejor_sim = 0.0
-    for intencion, ejemplos in INTENT_EXAMPLES.items():
-        for ejemplo in ejemplos:
-            sim = doc.similarity(nlp(ejemplo))
-            if sim > mejor_sim and sim > umbral:
-                mejor_sim = sim
-                mejor_intencion = intencion
 
-    # 2) intentar extraer tema explícito (frase tras 'de', 'sobre', 'acerca', etc.)
+    # 1 Comparar por promedio de similitud por intención
+    for intencion, ejemplos in INTENT_EXAMPLES.items():
+        sims = [doc.similarity(nlp(e)) for e in ejemplos]
+        sim_prom = sum(sims) / len(sims)
+        if sim_prom > mejor_sim and sim_prom > umbral:
+            mejor_sim = sim_prom
+            mejor_intencion = intencion
+
+    # 2 Intentar extraer tema explícito (frase tras preposición)
     consulta = _extract_after_prep(doc)
     if consulta:
-        consulta = _clean_topic(consulta)
-        return {"intencion": mejor_intencion, "similitud": round(mejor_sim, 2), "consulta": consulta}
+        return {
+            "intencion": mejor_intencion,
+            "similitud": round(mejor_sim, 2),
+            "consulta": _clean_topic(consulta),
+        }
 
-    # 3) intentar con entidades nombradas (PERSON, NORP, ORG, WORK_OF_ART, etc.)
+    # 3 Intentar con entidades nombradas
     ents = [ent.text for ent in doc.ents if ent.label_ in {"PER", "PERSON", "ORG", "WORK_OF_ART", "MISC"}]
     if ents:
-        # tomar la primera entidad razonable
-        return {"intencion": mejor_intencion, "similitud": round(mejor_sim, 2), "consulta": _clean_topic(ents[0])}
+        return {
+            "intencion": mejor_intencion,
+            "similitud": round(mejor_sim, 2),
+            "consulta": _clean_topic(ents[0]),
+        }
 
-    # 4) noun chunks: elegir chunk más representativo por similitud
+    # 4 Intentar con noun chunks
     noun_chunks = list(doc.noun_chunks)
     tema_nc = _choose_nounchunk_by_similarity(doc, noun_chunks)
     if tema_nc:
-        return {"intencion": mejor_intencion, "similitud": round(mejor_sim, 2), "consulta": _clean_topic(tema_nc)}
+        return {
+            "intencion": mejor_intencion,
+            "similitud": round(mejor_sim, 2),
+            "consulta": _clean_topic(tema_nc),
+        }
 
-    # 5) fallback: tomar el sustantivo raíz (si existe)
+    # 5 Fallback: sustantivo raíz
     sustantivos = [tok.lemma_ for tok in doc if tok.pos_ == "NOUN"]
     if sustantivos:
-        return {"intencion": mejor_intencion, "similitud": round(mejor_sim, 2), "consulta": sustantivos[0]}
+        return {
+            "intencion": mejor_intencion,
+            "similitud": round(mejor_sim, 2),
+            "consulta": sustantivos[0],
+        }
 
-    # 6) si no hay nada, devolver None en tema
-    return {"intencion": mejor_intencion, "similitud": round(mejor_sim, 2), "consulta": None}
+    # 6 Si no se encuentra tema
+    return {
+        "intencion": mejor_intencion,
+        "similitud": round(mejor_sim, 2),
+        "consulta": None,
+    }
 
 
+def detect_intention_spacy(texto: str):
+    doc = nlp(texto)
+    sims_globales = []
+
+    mejor_intencion = "no_implementada"
+    mejor_sim = 0.0
+
+    # 1. Calcular todas las similitudes
+    for intencion, ejemplos in INTENT_EXAMPLES.items():
+        for ejemplo in ejemplos:
+            sim = doc.similarity(nlp(ejemplo))
+            sims_globales.append((intencion, sim))
+            if sim > mejor_sim:
+                mejor_sim = sim
+                mejor_intencion = intencion
+
+    # 2. Calcular media y desviación estándar global
+    valores = [s for _, s in sims_globales]
+    media = statistics.mean(valores)
+    std = statistics.pstdev(valores)
+    z_score = (mejor_sim - media) / std if std > 0 else 0
+
+    # 3. Definir criterio adaptativo
+    # (si el mejor resultado está al menos 0.5 desviaciones por arriba de la media)
+    if z_score < 0.5:
+        mejor_intencion = "no_implementada"
+
+    return {
+        "intencion": mejor_intencion,
+        "similitud": round(mejor_sim, 2),
+        "z_score": round(z_score, 2),
+        "media": round(media, 2),
+        "consulta": _extract_after_prep(doc)
+    }

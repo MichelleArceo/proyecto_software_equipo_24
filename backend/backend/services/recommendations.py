@@ -9,6 +9,12 @@ load_dotenv()
 TMDB_API_KEY = os.getenv("TMDB_API_KEY")
 TMDB_BASE = "https://api.themoviedb.org/3"
 
+def get_tmdb_params(extra: dict = None):
+    base = {"api_key": TMDB_API_KEY, "language": "es-MX", "include_adult": "false"}
+    if extra:
+        base.update(extra)
+    return base
+
 
 # =====================================================
 # ============ Funciones auxiliares TMDB ==============
@@ -16,14 +22,7 @@ TMDB_BASE = "https://api.themoviedb.org/3"
 
 def search_tmdb_movies(query: str, max_results: int = 5):
     """Busca películas en TMDB usando texto libre (query)."""
-    params = {
-        "api_key": TMDB_API_KEY,
-        "query": query,
-        "language": "es-MX",
-        "include_adult": "false",
-        "page": 1
-    }
-    r = requests.get(f"{TMDB_BASE}/search/movie", params=params)
+    r = requests.get(f"{TMDB_BASE}/search/movie", params=get_tmdb_params({"query": query}))
     data = r.json()
     if not data.get("results"):
         return []
@@ -33,8 +32,7 @@ def search_tmdb_movies(query: str, max_results: int = 5):
 def search_tmdb_by_keyword(keyword: str, max_results: int = 5):
     """Busca películas en TMDB por keyword (temática)."""
     # Primero busca el ID de la keyword
-    params_kw = {"api_key": TMDB_API_KEY, "query": keyword}
-    r_kw = requests.get(f"{TMDB_BASE}/search/keyword", params=params_kw)
+    r_kw = requests.get(f"{TMDB_BASE}/search/keyword", params=get_tmdb_params({"query": keyword}))
     data_kw = r_kw.json()
 
     if not data_kw.get("results"):
@@ -43,13 +41,7 @@ def search_tmdb_by_keyword(keyword: str, max_results: int = 5):
     keyword_id = data_kw["results"][0]["id"]
 
     # Luego busca películas con esa keyword
-    params = {
-        "api_key": TMDB_API_KEY,
-        "with_keywords": keyword_id,
-        "language": "es-MX",
-        "include_adult": "false"
-    }
-    r = requests.get(f"{TMDB_BASE}/discover/movie", params=params)
+    r = requests.get(f"{TMDB_BASE}/discover/movie", params=get_tmdb_params({"with_keywords": keyword_id}))
     data = r.json()
 
     if not data.get("results"):
@@ -168,3 +160,134 @@ def create_recommendation(consulta: str, tipo_busqueda: str = "texto", max_resul
         "detalles": detalles
     }
 
+
+# =====================================================
+# =============== Películas similares =================
+# =====================================================
+def get_similar_movies(titulo: str, max_results: int = 5):
+    """
+    Busca una película por título en TMDB y devuelve otras similares.
+    """
+    # Paso 1: Buscar ID de la película base
+    search_url = f"{TMDB_BASE}/search/movie"
+    r = requests.get(search_url, params=get_tmdb_params({"page": 1, "query": titulo}))
+    r.raise_for_status()
+    data = r.json()
+
+    if not data.get("results"):
+        return {"mensaje": f"No encontré películas similares a '{titulo}'.", "detalles": []}
+
+    base_movie = data["results"][0]
+    base_id = base_movie["id"]
+
+    # Paso 2: Obtener similares
+    sim_url = f"{TMDB_BASE}/movie/{base_id}/similar"
+    r2 = requests.get(sim_url, params=get_tmdb_params({"page": 1}))
+    r2.raise_for_status()
+    sim_data = r2.json()
+
+    results = sim_data.get("results", [])[:max_results]
+
+    if not results:
+        return {"mensaje": f"No se encontraron películas similares a '{titulo}'.", "detalles": []}
+
+    # Paso 3: Estructurar resultado
+    timestamp = int(time.time() * 1000)
+    rec_payload = {
+        "consulta": f"Similares a {titulo}",
+        "fuente_datos": "TMDB",
+        "num_resultados": len(results),
+        "fecha_creacion": timestamp,
+        "mensaje_resultado": f"Películas similares a '{titulo}'",
+    }
+    recomendacion = backendless_post("recomendaciones", rec_payload)
+
+    detalles = []
+    for idx, movie in enumerate(results, start=1):
+        sinopsis = (movie.get("overview") or "").strip()[:250]
+        peli_payload = {
+            "mdb_id": str(movie.get("id")),
+            "titulo": movie.get("title"),
+            "fecha_estreno": movie.get("release_date", ""),
+            "sinopsis": sinopsis,
+        }
+
+        peli = backendless_post("peliculas", peli_payload)
+        detalle = {
+            "recomendacionId": recomendacion.get("objectId"),
+            "peliculaId": peli.get("objectId"),
+            "razon_recomendacion": f"Similar a '{titulo}'",
+            "orden": idx,
+            "fecha_creacion": timestamp,
+        }
+        backendless_post("detalleRecomendaciones", detalle)
+        detalle["pelicula"] = peli
+        detalles.append(detalle)
+
+    return {
+        "mensaje": f"Películas similares a '{titulo}' encontradas",
+        "recomendacion": recomendacion,
+        "detalles": detalles,
+    }
+
+
+# =====================================================
+# =============== Películas Populares =================
+# =====================================================
+def get_trending_movies(tipo: str = "popular", max_results: int = 5):
+    """
+    Devuelve películas populares o estrenos recientes desde TMDB.
+    tipo = "popular" o "estrenos"
+    """
+    if tipo == "estrenos":
+        endpoint = f"{TMDB_BASE}/movie/now_playing"
+        titulo_rec = "Estrenos recientes"
+    else:
+        endpoint = f"{TMDB_BASE}/trending/movie/day"
+        titulo_rec = "Películas populares"
+
+    r = requests.get(endpoint, params=get_tmdb_params({"page": 1}))
+    r.raise_for_status()
+    data = r.json()
+
+    results = data.get("results", [])[:max_results]
+    if not results:
+        return {"mensaje": f"No se encontraron {titulo_rec.lower()}.", "detalles": []}
+
+    # Crear registro principal
+    timestamp = int(time.time() * 1000)
+    rec_payload = {
+        "consulta": titulo_rec,
+        "fuente_datos": f"TMDB",
+        "num_resultados": len(results),
+        "fecha_creacion": timestamp,
+        "mensaje_resultado": titulo_rec,
+    }
+    recomendacion = backendless_post("recomendaciones", rec_payload)
+
+    detalles = []
+    for idx, movie in enumerate(results, start=1):
+        sinopsis = (movie.get("overview") or "").strip()[:250]
+        peli_payload = {
+            "mdb_id": str(movie.get("id")),
+            "titulo": movie.get("title"),
+            "fecha_estreno": movie.get("release_date", ""),
+            "sinopsis": sinopsis,
+        }
+        peli = backendless_post("peliculas", peli_payload)
+        detalle = {
+            "recomendacionId": recomendacion.get("objectId"),
+            "peliculaId": peli.get("objectId"),
+            "razon_recomendacion": f"{titulo_rec}",
+            "orden": idx,
+            "fecha_creacion": timestamp,
+        }
+        backendless_post("detalleRecomendaciones", detalle)
+        detalle["pelicula"] = peli
+        detalles.append(detalle)
+
+    return {
+        "mensaje": f"{titulo_rec} encontradas",
+        "recomendacion": recomendacion,
+        "detalles": detalles,
+    }

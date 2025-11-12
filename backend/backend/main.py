@@ -1,8 +1,8 @@
 from fastapi import Body, FastAPI, Query
 from fastapi import HTTPException
 from pydantic import BaseModel
-from services.backendless_client import backendless_get
-from services.recommendations import create_recommendation
+from services.backendless_client import backendless_get, backendless_patch
+from services.recommendations import create_recommendation, get_similar_movies, get_trending_movies
 from services.intentions import detect_intention_spacy
 
 import unicodedata
@@ -138,37 +138,69 @@ def chat_endpoint(q: str = Query(None, description="Texto a buscar en razón de 
         "consulta": consulta
     }
 
+
+@app.get("/evaluar")
+def obtener_detalle_para_evaluar():
+    """
+    Retorna el primer detalle de recomendación sin evaluación asignada,
+    incluyendo la información de la película.
+    """
+    query = "evaluacion is null"
+    order = "fecha_creacion asc"
+    params = {"where": query, "sortBy": order}
+    detalles = backendless_get("detalleRecomendaciones", params)
+
+    if not detalles:
+        return {"mensaje": "No hay recomendaciones pendientes por evaluar"}
+
+    detalle = detalles[0]
+    pelicula = backendless_get("peliculas", {"where": f"objectId='{detalle['peliculaId']}'"})
+
+    if pelicula and isinstance(pelicula, list):
+        detalle["pelicula"] = pelicula[0]
+
+    return detalle
+
+
+@app.patch("/evaluar/{detalle_id}")
+def actualizar_evaluacion(detalle_id: str, evaluacion: int = Query(..., ge=0, le=5)):
+    """
+    Actualiza la evaluación de un detalle de recomendación.
+    """
+    payload = {"evaluacion": evaluacion}
+    backendless_patch("detalleRecomendaciones", detalle_id, payload)
+    return {"mensaje": f"Evaluación registrada ({evaluacion} estrellas)."}
+
+
 @app.post("/gateway")
 def gateway(payload: GatewayIn):
     """
     Recibe texto del usuario, detecta intención y ejecuta la acción
-    (crear recomendación o listar recomendaciones). Si no soportada, 422.
+    (crear recomendación, listar o calificar). Si no soportada, 422.
     """
-    # 1) Detectar intención (reusa lógica actual)
-    analisis = detect_intention_spacy(
+    # 1) Normalizar texto y detectar intención
+    texto = (
         unicodedata.normalize("NFD", payload.utterance)
         .encode("ascii", "ignore")
         .decode("utf-8")
         .lower()
     )
+    analisis = detect_intention_spacy(texto)
     intent = (analisis.get("intencion") or "").strip()
-    consulta = (analisis.get("consulta") or "").strip() or "popular"
+    consulta = (analisis.get("consulta") or "").strip()
+    print(f"\nAnálisis: {analisis}\n")
 
-    # 2) Enrutar por intención a invocar el "segundo endpoint"
+    # 2) Enrutar por intención
+    # ------------------------------------------------------------
     if intent == "nueva_recomendacion":
-        # Reusa función actual de creación
-        return create_recommendation(
-            consulta=consulta
-        )
+        return create_recommendation(consulta=consulta)
 
+    # ------------------------------------------------------------
     if intent == "ver_recomendaciones":
-        # Reusa GET /recomendacion (lógica de listar). Aquí pedimos todo.
-        # Alternativa rápida: consulta directa a detalleRecomendaciones si prefieres.
         detalles = backendless_get("detalleRecomendaciones")
         if not isinstance(detalles, list):
             raise HTTPException(status_code=500, detail="Error al consultar detalleRecomendaciones")
 
-        # Enriquecer con película como haces en GET /recomendacion
         resultados = []
         for item in detalles:
             pelicula_id = item.get("peliculaId")
@@ -192,5 +224,39 @@ def gateway(payload: GatewayIn):
             "detalles": resultados
         }
 
-    # 3) Intención no soportada
+    # ------------------------------------------------------------
+    if intent == "calificar_recomendaciones":
+        # Buscar la recomendación pendiente más antigua
+        query = "evaluacion is null"
+        order = "fecha_creacion asc"
+        params = {"where": query, "sortBy": order}
+        detalles = backendless_get("detalleRecomendaciones", params)
+
+        if not detalles:
+            return {"mensaje": "No hay recomendaciones pendientes por evaluar."}
+
+        detalle = detalles[0]
+        pelicula = backendless_get("peliculas", {"where": f"objectId='{detalle['peliculaId']}'"})
+        if pelicula and isinstance(pelicula, list):
+            detalle["pelicula"] = pelicula[0]
+
+        return {
+            "mensaje": "Evaluación pendiente",
+            "detalle": detalle
+        }
+
+    # ------------------------------------------------------------
+    if intent == "buscar_similares":
+        return get_similar_movies(consulta)
+
+    # ------------------------------------------------------------
+    if intent == "ver_tendencias":
+        # Puedes decidir el tipo dinámicamente si el usuario menciona "estreno"
+        tipo = "estrenos" if "estreno" in payload.utterance.lower() else "popular"
+        return get_trending_movies(tipo)
+
+
+    # ------------------------------------------------------------
     raise HTTPException(status_code=422, detail=f"Operación no soportada: {intent}")
+
+

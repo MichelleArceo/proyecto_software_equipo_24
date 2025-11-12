@@ -71,3 +71,26 @@ button[type="submit"] {
     cursor: pointer;
     font-weight: bold;
 }
+
+.rating-block button {
+  margin: 4px;
+  padding: 6px 12px;
+  border: none;
+  border-radius: 5px;
+  background-color: #007bff;
+  color: white;
+  font-weight: bold;
+  cursor: pointer;
+}
+
+.rating-block button:hover {
+  background-color: #0056b3;
+}
+
+.rating-block button[data-score="exit"] {
+  background-color: #dc3545;
+}
+
+.rating-block button[data-score="exit"]:hover {
+  background-color: #a71d2a;
+}
